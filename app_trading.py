@@ -377,15 +377,18 @@ def load_data(symbol, start_date, end_date, retries=5):
         except Exception as e:
             logger.error(f"Erreur tentative {attempt + 1}: {str(e)}")
             if attempt == retries - 1:
-                return None, {"error": str(e), "symbol": symbol}
+                return pd.DataFrame(), {"error": str(e), "symbol": symbol}
             time.sleep(2)
+    
+    # Return empty DataFrame if all retries fail
+    return pd.DataFrame(), {"error": "Failed after all retries", "symbol": symbol}
 
 start_date = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')
 end_date = datetime.now().strftime('%Y-%m-%d')
 df, data_report = load_data(yahoo_symbol, start_date, end_date)
 
-if df is None or df.empty:
-    st.error(f"❌ Impossible de charger les données pour {symbol}. Veuillez réessayer ou choisir un autre actif.")
+if df.empty:
+    st.error(f"❌ Impossible de charger les données pour {symbol}. Veuillez réessayer ou choisir un autre actif. Erreur: {data_report.get('error', 'Unknown error')}")
     st.stop()
 
 # Fonctions pour les modèles avec gestion d'erreur améliorée
