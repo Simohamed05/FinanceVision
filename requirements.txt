@@ -10,3 +10,4 @@ streamlit-autorefresh==1.0.1
 python-dotenv==1.0.1
 ta==0.11.0
 statsmodels
+keras
