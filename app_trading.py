@@ -327,30 +327,29 @@ with st.sidebar:
     """, unsafe_allow_html=True)
 
 # Mappage des symboles
-symbol_map = {
-    "XAUUSD": "GC=F",
-    "EURUSD": "EURUSD=X",
-    "BTCUSD": "BTC-USD",
-    "USDJPY": "JPY=X",
-    "GBPUSD": "GBPUSD=X"
-}
-yahoo_symbol = symbol_map[symbol]
+
 
 # Chargement des données avec cache
 @st.cache_data(ttl=3600, show_spinner="Chargement des données marché...")
-def load_data(symbol, start_date, end_date, retries=5):
+def load_data(symbol, start_date, end_date, retries=3):
+    df = pd.DataFrame()  # Initialize empty DataFrame
+    data_report = {"error": None, "symbol": symbol, "rows": 0}
+    
     for attempt in range(retries):
         try:
             data = yf.download(symbol, start=start_date, end=end_date, progress=False)
             
             if data.empty or 'Close' not in data.columns:
+                logger.warning(f"Empty data or missing columns for {symbol}, attempt {attempt + 1}")
+                time.sleep(2)
                 continue
 
+            # Create the DataFrame structure we need
             df = data.reset_index()[['Date', 'Close', 'Open', 'High', 'Low', 'Volume']]
             df.columns = ['ds', 'y', 'Open', 'High', 'Low', 'Volume']
             df['ds'] = pd.to_datetime(df['ds']).dt.normalize()
 
-            # Calcul des indicateurs techniques
+            # Calculate technical indicators
             try:
                 df['SMA_20'] = df['y'].rolling(window=20).mean()
                 df['SMA_50'] = df['y'].rolling(window=50).mean()
@@ -362,7 +361,7 @@ def load_data(symbol, start_date, end_date, retries=5):
                 df['CCI'] = ta.trend.cci(df['High'], df['Low'], df['y'], window=20)
                 df['ATR'] = ta.volatility.average_true_range(df['High'], df['Low'], df['y'], window=14)
             except Exception as e:
-                logger.error(f"Erreur calcul indicateurs: {str(e)}")
+                logger.error(f"Error calculating indicators: {str(e)}")
                 for col in ['SMA_20', 'SMA_50', 'RSI', 'MACD', 'BB_upper', 'BB_lower', 'STOCH', 'CCI', 'ATR']:
                     if col not in df.columns:
                         df[col] = np.nan
@@ -370,24 +369,58 @@ def load_data(symbol, start_date, end_date, retries=5):
             df = df.dropna()
             
             if len(df) < 20:
+                logger.warning(f"Insufficient data points ({len(df)}) for {symbol}, attempt {attempt + 1}")
+                time.sleep(2)
                 continue
                 
-            return df, {"error": None, "symbol": symbol, "rows": len(df)}
+            data_report = {"error": None, "symbol": symbol, "rows": len(df)}
+            return df, data_report
             
         except Exception as e:
-            logger.error(f"Erreur tentative {attempt + 1}: {str(e)}")
+            logger.error(f"Attempt {attempt + 1} failed for {symbol}: {str(e)}")
+            data_report = {"error": str(e), "symbol": symbol, "rows": 0}
             if attempt == retries - 1:
-                return None, {"error": str(e), "symbol": symbol}
+                return pd.DataFrame(), data_report
             time.sleep(2)
+    
+    return df, data_report  # Return whatever we have (might be empty)
 
+# Mappage des symboles avec alternatives
+symbol_map = {
+    "XAUUSD": ["GC=F", "XAU-USD", "XAUUSD=X"],  # Multiple alternatives for gold
+    "EURUSD": ["EURUSD=X"],
+    "BTCUSD": ["BTC-USD"],
+    "USDJPY": ["JPY=X"],
+    "GBPUSD": ["GBPUSD=X"]
+}
+yahoo_symbol = symbol_map[symbol]
+# Get the primary symbol and alternatives
+symbol_options = symbol_map.get(symbol, [symbol])
 start_date = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')
 end_date = datetime.now().strftime('%Y-%m-%d')
-df, data_report = load_data(yahoo_symbol, start_date, end_date)
 
-if df is None or df.empty:
-    st.error(f"❌ Impossible de charger les données pour {symbol}. Veuillez réessayer ou choisir un autre actif.")
+# Try each symbol option until we get data
+df = pd.DataFrame()
+data_report = {"error": "No symbols tried yet"}
+
+for yahoo_symbol in symbol_options:
+    df, data_report = load_data(yahoo_symbol, start_date, end_date)
+    if not df.empty:
+        break  # Stop if we got valid data
+
+if df.empty:
+    error_msg = data_report.get('error', 'Unknown error')
+    st.error(f"""
+    ❌ Impossible de charger les données pour {symbol}.
+    Symboles essayés: {', '.join(symbol_options)}
+    Erreur: {error_msg}
+    
+    Suggestions:
+    1. Vérifiez votre connexion internet
+    2. Essayez un autre actif
+    3. Réessayez plus tard
+    """)
     st.stop()
-
 # Fonctions pour les modèles avec gestion d'erreur améliorée
 def run_prophet(_df, _horizon):
     try:
