@@ -327,98 +327,114 @@ with st.sidebar:
     """, unsafe_allow_html=True)
 
 # Mappage des symboles
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+# Configure requests session for yfinance
+session = requests.Session()
+retry = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
+adapter = HTTPAdapter(max_retries=retry)
+session.mount('http://', adapter)
+session.mount('https://', adapter)
 
+# Apply the session to yfinance
+yf.pdr_override()
 
 # Chargement des données avec cache
 @st.cache_data(ttl=3600, show_spinner="Chargement des données marché...")
 def load_data(symbol, start_date, end_date, retries=3):
-    df = pd.DataFrame()  # Initialize empty DataFrame
-    data_report = {"error": None, "symbol": symbol, "rows": 0}
+    empty_df = pd.DataFrame(columns=['ds', 'y', 'Open', 'High', 'Low', 'Volume'])
+    default_report = {"error": "No data loaded", "symbol": symbol, "rows": 0}
     
     for attempt in range(retries):
         try:
-            data = yf.download(symbol, start=start_date, end=end_date, progress=False)
+            # Try to download data with timeout
+            data = yf.download(
+                symbol, 
+                start=start_date, 
+                end=end_date, 
+                progress=False,
+                timeout=10
+            )
             
             if data.empty or 'Close' not in data.columns:
-                logger.warning(f"Empty data or missing columns for {symbol}, attempt {attempt + 1}")
+                logger.warning(f"Empty data for {symbol}, attempt {attempt + 1}")
                 time.sleep(2)
                 continue
 
-            # Create the DataFrame structure we need
+            # Prepare the DataFrame
             df = data.reset_index()[['Date', 'Close', 'Open', 'High', 'Low', 'Volume']]
             df.columns = ['ds', 'y', 'Open', 'High', 'Low', 'Volume']
             df['ds'] = pd.to_datetime(df['ds']).dt.normalize()
 
-            # Calculate technical indicators
-            try:
-                df['SMA_20'] = df['y'].rolling(window=20).mean()
-                df['SMA_50'] = df['y'].rolling(window=50).mean()
-                df['RSI'] = ta.momentum.rsi(df['y'], window=14)
-                df['MACD'] = ta.trend.macd_diff(df['y'])
-                df['BB_upper'] = df['y'].rolling(window=20).mean() + 2*df['y'].rolling(window=20).std()
-                df['BB_lower'] = df['y'].rolling(window=20).mean() - 2*df['y'].rolling(window=20).std()
-                df['STOCH'] = ta.momentum.stoch(df['High'], df['Low'], df['y'], window=14)
-                df['CCI'] = ta.trend.cci(df['High'], df['Low'], df['y'], window=20)
-                df['ATR'] = ta.volatility.average_true_range(df['High'], df['Low'], df['y'], window=14)
-            except Exception as e:
-                logger.error(f"Error calculating indicators: {str(e)}")
-                for col in ['SMA_20', 'SMA_50', 'RSI', 'MACD', 'BB_upper', 'BB_lower', 'STOCH', 'CCI', 'ATR']:
-                    if col not in df.columns:
-                        df[col] = np.nan
+            # Calculate indicators safely
+            indicators = {
+                'SMA_20': lambda x: x['y'].rolling(window=20).mean(),
+                'SMA_50': lambda x: x['y'].rolling(window=50).mean(),
+                'RSI': lambda x: ta.momentum.rsi(x['y'], window=14),
+                'MACD': lambda x: ta.trend.macd_diff(x['y']),
+                'BB_upper': lambda x: x['y'].rolling(window=20).mean() + 2*x['y'].rolling(window=20).std(),
+                'BB_lower': lambda x: x['y'].rolling(window=20).mean() - 2*x['y'].rolling(window=20).std(),
+                'STOCH': lambda x: ta.momentum.stoch(x['High'], x['Low'], x['y'], window=14),
+                'CCI': lambda x: ta.trend.cci(x['High'], x['Low'], x['y'], window=20),
+                'ATR': lambda x: ta.volatility.average_true_range(x['High'], x['Low'], x['y'], window=14)
+            }
+
+            for name, func in indicators.items():
+                try:
+                    df[name] = func(df)
+                except Exception as e:
+                    logger.error(f"Error calculating {name}: {str(e)}")
+                    df[name] = np.nan
 
             df = df.dropna()
             
             if len(df) < 20:
-                logger.warning(f"Insufficient data points ({len(df)}) for {symbol}, attempt {attempt + 1}")
-                time.sleep(2)
+                logger.warning(f"Insufficient data points ({len(df)})")
                 continue
                 
-            data_report = {"error": None, "symbol": symbol, "rows": len(df)}
-            return df, data_report
+            return df, {"error": None, "symbol": symbol, "rows": len(df)}
             
         except Exception as e:
-            logger.error(f"Attempt {attempt + 1} failed for {symbol}: {str(e)}")
-            data_report = {"error": str(e), "symbol": symbol, "rows": 0}
-            if attempt == retries - 1:
-                return pd.DataFrame(), data_report
+            logger.error(f"Attempt {attempt + 1} failed: {str(e)}")
             time.sleep(2)
     
-    return df, data_report  # Return whatever we have (might be empty)
+    return empty_df, default_report
 
-# Mappage des symboles avec alternatives
+# Enhanced symbol mapping with fallbacks
 symbol_map = {
-    "XAUUSD": ["GC=F", "XAU-USD", "XAUUSD=X"],  # Multiple alternatives for gold
+    "XAUUSD": ["GC=F", "XAUUSD=X", "XAU-USD"],  # Gold has multiple representations
     "EURUSD": ["EURUSD=X"],
-    "BTCUSD": ["BTC-USD"],
+    "BTCUSD": ["BTC-USD", "BTCUSD=X"],
     "USDJPY": ["JPY=X"],
     "GBPUSD": ["GBPUSD=X"]
 }
-yahoo_symbol = symbol_map[symbol]
-# Get the primary symbol and alternatives
+
+# Get current symbol and alternatives
 symbol_options = symbol_map.get(symbol, [symbol])
 start_date = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')
 end_date = datetime.now().strftime('%Y-%m-%d')
 
-# Try each symbol option until we get data
+# Try each symbol option
 df = pd.DataFrame()
-data_report = {"error": "No symbols tried yet"}
+last_error = "No symbols tried"
 
 for yahoo_symbol in symbol_options:
     df, data_report = load_data(yahoo_symbol, start_date, end_date)
     if not df.empty:
-        break  # Stop if we got valid data
+        break
+    last_error = data_report.get('error', 'Unknown error')
 
 if df.empty:
-    error_msg = data_report.get('error', 'Unknown error')
     st.error(f"""
     ❌ Impossible de charger les données pour {symbol}.
     Symboles essayés: {', '.join(symbol_options)}
-    Erreur: {error_msg}
+    Dernière erreur: {last_error}
     
     Suggestions:
-    1. Vérifiez votre connexion internet
-    2. Essayez un autre actif
-    3. Réessayez plus tard
+    1. Essayez un autre actif
+    2. Réessayez plus tard
+    3. Contactez le support si le problème persiste
     """)
     st.stop()
 # Fonctions pour les modèles avec gestion d'erreur améliorée
