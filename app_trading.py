@@ -321,120 +321,103 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("""
     <div style="text-align: center; color: #9ca3af; font-size: 0.875rem;">
-        Version 2.1 Pro<br>
-        © 2023 FinanceVision
+        <br>
+        © 2025 FinanceVision
     </div>
     """, unsafe_allow_html=True)
 
 # Mappage des symboles
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
-# Configure requests session for yfinance
-session = requests.Session()
-retry = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
-adapter = HTTPAdapter(max_retries=retry)
-session.mount('http://', adapter)
-session.mount('https://', adapter)
 
-# Apply the session to yfinance
-yf.pdr_override()
 
 # Chargement des données avec cache
-@st.cache_data(ttl=3600, show_spinner="Chargement des données marché...")
+@st.cache_data(ttl=60, show_spinner="Chargement des données marché...")
 def load_data(symbol, start_date, end_date, retries=3):
-    empty_df = pd.DataFrame(columns=['ds', 'y', 'Open', 'High', 'Low', 'Volume'])
-    default_report = {"error": "No data loaded", "symbol": symbol, "rows": 0}
-    
+    df = pd.DataFrame()  # Initialize empty DataFrame
+    data_report = {"error": None, "symbol": symbol, "rows": 0}
+    # Après avoir chargé les données
     for attempt in range(retries):
         try:
-            # Try to download data with timeout
-            data = yf.download(
-                symbol, 
-                start=start_date, 
-                end=end_date, 
-                progress=False,
-                timeout=10
-            )
-            
-            if data.empty or 'Close' not in data.columns:
-                logger.warning(f"Empty data for {symbol}, attempt {attempt + 1}")
-                time.sleep(2)
-                continue
+            data = yf.download(symbol, start=start_date, end=end_date, interval="1d", progress=False)
+            data.index = data.index.tz_localize(None)
+            if data.empty:
+                st.cache_data.clear()
+                data = yf.download(symbol, start=start_date, end=end_date, interval="1d", progress=False)
 
-            # Prepare the DataFrame
+            # Create the DataFrame structure we need
             df = data.reset_index()[['Date', 'Close', 'Open', 'High', 'Low', 'Volume']]
             df.columns = ['ds', 'y', 'Open', 'High', 'Low', 'Volume']
             df['ds'] = pd.to_datetime(df['ds']).dt.normalize()
 
-            # Calculate indicators safely
-            indicators = {
-                'SMA_20': lambda x: x['y'].rolling(window=20).mean(),
-                'SMA_50': lambda x: x['y'].rolling(window=50).mean(),
-                'RSI': lambda x: ta.momentum.rsi(x['y'], window=14),
-                'MACD': lambda x: ta.trend.macd_diff(x['y']),
-                'BB_upper': lambda x: x['y'].rolling(window=20).mean() + 2*x['y'].rolling(window=20).std(),
-                'BB_lower': lambda x: x['y'].rolling(window=20).mean() - 2*x['y'].rolling(window=20).std(),
-                'STOCH': lambda x: ta.momentum.stoch(x['High'], x['Low'], x['y'], window=14),
-                'CCI': lambda x: ta.trend.cci(x['High'], x['Low'], x['y'], window=20),
-                'ATR': lambda x: ta.volatility.average_true_range(x['High'], x['Low'], x['y'], window=14)
-            }
-
-            for name, func in indicators.items():
-                try:
-                    df[name] = func(df)
-                except Exception as e:
-                    logger.error(f"Error calculating {name}: {str(e)}")
-                    df[name] = np.nan
+            # Calculate technical indicators
+            try:
+                df['SMA_20'] = df['y'].rolling(window=20).mean()
+                df['SMA_50'] = df['y'].rolling(window=50).mean()
+                df['RSI'] = ta.momentum.rsi(df['y'], window=14)
+                df['MACD'] = ta.trend.macd_diff(df['y'])
+                df['BB_upper'] = df['y'].rolling(window=20).mean() + 2*df['y'].rolling(window=20).std()
+                df['BB_lower'] = df['y'].rolling(window=20).mean() - 2*df['y'].rolling(window=20).std()
+                df['STOCH'] = ta.momentum.stoch(df['High'], df['Low'], df['y'], window=14)
+                df['CCI'] = ta.trend.cci(df['High'], df['Low'], df['y'], window=20)
+                df['ATR'] = ta.volatility.average_true_range(df['High'], df['Low'], df['y'], window=14)
+            except Exception as e:
+                logger.error(f"Error calculating indicators: {str(e)}")
+                for col in ['SMA_20', 'SMA_50', 'RSI', 'MACD', 'BB_upper', 'BB_lower', 'STOCH', 'CCI', 'ATR']:
+                    if col not in df.columns:
+                        df[col] = np.nan
 
             df = df.dropna()
             
             if len(df) < 20:
-                logger.warning(f"Insufficient data points ({len(df)})")
+                logger.warning(f"Insufficient data points ({len(df)}) for {symbol}, attempt {attempt + 1}")
+                time.sleep(2)
                 continue
                 
-            return df, {"error": None, "symbol": symbol, "rows": len(df)}
+            data_report = {"error": None, "symbol": symbol, "rows": len(df)}
+            return df, data_report
             
         except Exception as e:
-            logger.error(f"Attempt {attempt + 1} failed: {str(e)}")
+            logger.error(f"Attempt {attempt + 1} failed for {symbol}: {str(e)}")
+            data_report = {"error": str(e), "symbol": symbol, "rows": 0}
+            if attempt == retries - 1:
+                return pd.DataFrame(), data_report
             time.sleep(2)
     
-    return empty_df, default_report
+    return df, data_report  # Return whatever we have (might be empty)
 
-# Enhanced symbol mapping with fallbacks
+# Mappage des symboles avec alternatives
 symbol_map = {
-    "XAUUSD": ["GC=F", "XAUUSD=X", "XAU-USD"],  # Gold has multiple representations
+    "XAUUSD": ["GC=F", "XAU-USD", "XAUUSD=X"],  # Multiple alternatives for gold
     "EURUSD": ["EURUSD=X"],
-    "BTCUSD": ["BTC-USD", "BTCUSD=X"],
+    "BTCUSD": ["BTC-USD"],
     "USDJPY": ["JPY=X"],
     "GBPUSD": ["GBPUSD=X"]
 }
-
-# Get current symbol and alternatives
+yahoo_symbol = symbol_map[symbol]
+# Get the primary symbol and alternatives
 symbol_options = symbol_map.get(symbol, [symbol])
 start_date = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')
 end_date = datetime.now().strftime('%Y-%m-%d')
 
-# Try each symbol option
+# Try each symbol option until we get data
 df = pd.DataFrame()
-last_error = "No symbols tried"
+data_report = {"error": "No symbols tried yet"}
 
 for yahoo_symbol in symbol_options:
     df, data_report = load_data(yahoo_symbol, start_date, end_date)
     if not df.empty:
-        break
-    last_error = data_report.get('error', 'Unknown error')
+        break  # Stop if we got valid data
 
 if df.empty:
+    error_msg = data_report.get('error', 'Unknown error')
     st.error(f"""
     ❌ Impossible de charger les données pour {symbol}.
     Symboles essayés: {', '.join(symbol_options)}
-    Dernière erreur: {last_error}
+    Erreur: {error_msg}
     
     Suggestions:
-    1. Essayez un autre actif
-    2. Réessayez plus tard
-    3. Contactez le support si le problème persiste
+    1. Vérifiez votre connexion internet
+    2. Essayez un autre actif
+    3. Réessayez plus tard
     """)
     st.stop()
 # Fonctions pour les modèles avec gestion d'erreur améliorée
@@ -869,7 +852,13 @@ if current_tab == "Accueil":
 # Onglet Dashboard
 elif current_tab == "Dashboard":
     st.header("📊 Tableau de Bord")
-    
+    # Dans l'onglet Dashboard ou Accueil
+    if st.button("🔄 Actualiser les Données"):
+        st.cache_data.clear()
+        df, data_report = load_data(symbol_map[symbol], 
+                                (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d'),
+                                datetime.now().strftime('%Y-%m-%d'))
+        st.rerun()
     # Metrics row
     col1, col2, col3, col4 = st.columns(4)
     with col1:
@@ -1553,149 +1542,157 @@ elif current_tab == "Backtesting":
 
 # Onglet Compte Démo
 elif current_tab == "Compte Démo":
-    st.header("💰 Compte Démo Trading")
-    
-    # Initialisation du compte démo
+    st.header("💰 Compte Démo Trading Avancé avec SL/TP")
+
+    # Initialisation du compte démo sécurisé
     if 'demo_account' not in st.session_state:
         st.session_state.demo_account = {
             'balance': 10000,
+            'equity': 10000,
+            'margin_used': 0,
+            'free_margin': 10000,
+            'margin_level': 0,
             'positions': [],
-            'trade_history': []
+            'trade_history': [],
+            'leverage': 100
         }
-    
-    # Fonction d'exécution des trades
-    def execute_trade(action, price, quantity):
-        account = st.session_state.demo_account
-        
-        try:
-            if action == 'BUY':
-                cost = price * quantity
-                if cost > account['balance']:
-                    st.error("Fonds insuffisants")
-                    return False
-                
-                account['balance'] -= cost
-                account['positions'].append({
-                    'symbol': symbol,
-                    'quantity': quantity,
-                    'entry_price': price,
-                    'entry_time': datetime.now()
-                })
-                st.success(f"Achat réussi: {quantity} {symbol} à {price:.2f} $")
-                return True
-                
-            elif action == 'SELL':
-                # Vérifier qu'on a des positions pour ce symbole
-                positions = [p for p in account['positions'] if p['symbol'] == symbol]
-                if not positions:
-                    st.error(f"Aucune position ouverte pour {symbol}")
-                    return False
-                
-                # Calculer la quantité totale détenue
-                total_quantity = sum(p['quantity'] for p in positions)
-                if quantity > total_quantity:
-                    st.error(f"Quantité trop élevée (max: {total_quantity})")
-                    return False
-                
-                # Vendre selon la méthode FIFO (First In First Out)
-                remaining = quantity
-                for pos in positions[:]:  # On fait une copie
-                    if remaining <= 0:
-                        break
-                        
-                    sell_qty = min(pos['quantity'], remaining)
-                    profit = (price - pos['entry_price']) * sell_qty
-                    
-                    account['balance'] += price * sell_qty
-                    pos['quantity'] -= sell_qty
-                    
-                    account['trade_history'].append({
-                        'type': 'SELL',
-                        'symbol': symbol,
-                        'quantity': sell_qty,
-                        'price': price,
-                        'profit': profit,
-                        'time': datetime.now(),
-                        'balance': account['balance']
-                    })
-                    remaining -= sell_qty
-                
-                # Nettoyer les positions vides
-                account['positions'] = [p for p in account['positions'] if p['quantity'] > 0]
-                st.success(f"Vente réussie: {quantity} {symbol} à {price:.2f} $")
-                return True
-                
-        except Exception as e:
-            st.error(f"Erreur: {str(e)}")
-            return False
 
-    # Affichage du solde
-    col1, col2 = st.columns(2)
-    with col1:
-        st.metric("Solde Disponible", f"{st.session_state.demo_account['balance']:,.2f} $")
-    with col2:
-        total_value = sum(p['quantity'] * df['y'].iloc[-1] 
-                         for p in st.session_state.demo_account['positions'])
-        st.metric("Valeur Positions", f"{total_value:,.2f} $")
+    account = st.session_state.demo_account
 
-    # Formulaire de trading
+    # Calcul dynamique
+    # Calcul dynamique PNL
+    floating_pnl = 0
+    for pos in account['positions']:
+        price_diff = df['y'].iloc[-1] - pos['entry_price']
+        if pos.get('type', 'BUY') == 'BUY':  # ✅ sécurisé ici
+            floating_pnl += price_diff * pos['quantity']
+        else:
+            floating_pnl += -price_diff * pos['quantity']
+
+
+    account['equity'] = account['balance'] + floating_pnl
+    account['margin_used'] = sum(
+        (pos['entry_price'] * pos['quantity']) / pos['leverage']
+        for pos in account['positions']
+    )
+    account['free_margin'] = account['equity'] - account['margin_used']
+    account['margin_level'] = (account['equity'] / account['margin_used']) * 100 if account['margin_used'] > 0 else 0
+
+    # Affichage du compte
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Solde", f"${account['balance']:,.2f}")
+    col2.metric("Equity", f"${account['equity']:,.2f}")
+    col3.metric("Marge Utilisée", f"${account['margin_used']:,.2f}")
+    col4.metric("Margin Level", f"{account['margin_level']:.2f}%")
+
+    col5, col6 = st.columns(2)
+    col5.metric("Free Margin", f"${account['free_margin']:,.2f}")
+    col6.metric("PNL Flottant", f"${floating_pnl:,.2f}", delta=f"{floating_pnl/account['balance']*100:.2f}%")
+
+    st.divider()
+
+    # Formulaire Trading
     with st.form("trade_form"):
-        st.subheader("Nouvelle Transaction")
-        
+        st.subheader("Nouvel Ordre")
         action = st.radio("Type", ["BUY", "SELL"], horizontal=True)
         quantity = st.number_input("Quantité", min_value=0.01, value=1.0, step=0.01)
         current_price = df['y'].iloc[-1]
-        st.markdown(f"**Prix actuel:** {current_price:.2f} $")
-        
-        submitted = st.form_submit_button(
-            "Exécuter l'Ordre",
-            type="primary" if action == "BUY" else "secondary"
-        )
-        
-        if submitted:
-            if execute_trade(action, current_price, quantity):
-                st.rerun()  # Rafraîchir l'affichage
+        st.markdown(f"**Prix Actuel : {current_price:.2f} $**")
 
-    # Liste des positions
-    st.subheader("Positions Ouvertes")
-    if not st.session_state.demo_account['positions']:
+        leverage = st.number_input("Effet de Levier", min_value=1, max_value=1000, value=account.get('leverage', 100))
+
+        st.markdown("---")
+        st.markdown("**Options Stop Loss / Take Profit**")
+        sl_mode = st.radio("Mode SL/TP", ["Pips", "Prix Direct"], horizontal=True)
+
+        if sl_mode == "Pips":
+            sl_pips = st.number_input("Stop Loss (en Pips)", min_value=0.0, value=50.0, step=0.1)
+            tp_pips = st.number_input("Take Profit (en Pips)", min_value=0.0, value=100.0, step=0.1)
+        else:
+            sl_price = st.number_input("Prix Stop Loss", min_value=0.0, value=0.0)
+            tp_price = st.number_input("Prix Take Profit", min_value=0.0, value=0.0)
+
+        submitted = st.form_submit_button("Exécuter l'Ordre")
+
+        if submitted:
+            margin_required = (current_price * quantity) / leverage
+            if account['free_margin'] >= margin_required:
+                sl = None
+                tp = None
+                if sl_mode == "Pips":
+                    if action == "BUY":
+                        sl = current_price - sl_pips * 0.01
+                        tp = current_price + tp_pips * 0.01
+                    else:
+                        sl = current_price + sl_pips * 0.01
+                        tp = current_price - tp_pips * 0.01
+                else:
+                    sl = sl_price if sl_price > 0 else None
+                    tp = tp_price if tp_price > 0 else None
+
+                account['balance'] -= margin_required
+                account['positions'].append({
+                    'symbol': symbol,
+                    'type': action,
+                    'quantity': quantity,
+                    'entry_price': current_price,
+                    'stop_loss': sl,
+                    'take_profit': tp,
+                    'leverage': leverage,
+                    'entry_time': datetime.now()
+                })
+                account['leverage'] = leverage
+                st.success(f"{action} {quantity} {symbol} @ {current_price:.2f} avec SL={sl:.2f}, TP={tp:.2f}")
+            else:
+                st.error("Fonds insuffisants !")
+            st.rerun()
+
+    # Affichage des Positions
+    st.subheader("📋 Positions Ouvertes")
+    if not account['positions']:
         st.info("Aucune position ouverte")
     else:
-        for idx, pos in enumerate(st.session_state.demo_account['positions']):
-            if pos['symbol'] == symbol:
-                cols = st.columns([3, 2, 2, 1])
-                current_value = df['y'].iloc[-1] * pos['quantity']
-                profit = current_value - (pos['entry_price'] * pos['quantity'])
-                
-                with cols[0]:
-                    st.markdown(f"""
-                    **{pos['symbol']}**  
-                    {pos['quantity']} @ {pos['entry_price']:.2f} $
-                    """)
-                
-                with cols[1]:
-                    st.markdown(f"**Val. actuelle:** {current_value:.2f} $")
-                
-                with cols[2]:
-                    st.markdown(f"""
-                    **Profit:**  
-                    <span style="color: {'#10b981' if profit >= 0 else '#ef4444'}">
-                        {profit:.2f} $ ({(profit/(pos['entry_price']*pos['quantity'])):.2%})
-                    </span>
-                    """, unsafe_allow_html=True)
-                
-                with cols[3]:
-                    if st.button("Vendre", key=f"sell_{idx}"):
-                        execute_trade('SELL', df['y'].iloc[-1], pos['quantity'])
-                        st.rerun()
+        for idx, pos in enumerate(account['positions']):
+            price_now = df['y'].iloc[-1]
+            if pos['type'] == 'BUY':
+                pnl = (price_now - pos['entry_price']) * pos['quantity']
+            else:
+                pnl = (pos['entry_price'] - price_now) * pos['quantity']
+            margin = (pos['entry_price'] * pos['quantity']) / pos['leverage']
 
-    # Historique des transactions
-    st.subheader("Historique des Transactions")
-    if st.session_state.demo_account['trade_history']:
-        history_df = pd.DataFrame(st.session_state.demo_account['trade_history'])
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.write(f"**{pos['type']} {pos['symbol']}**")
+                st.write(f"Entrée : {pos['entry_price']:.2f}")
+            with col2:
+                st.write(f"Quantité : {pos['quantity']:.2f}")
+                st.write(f"Marge : {margin:.2f} $")
+            with col3:
+                st.write(f"SL : {pos['stop_loss']:.2f}" if pos['stop_loss'] else "SL : -")
+                st.write(f"TP : {pos['take_profit']:.2f}" if pos['take_profit'] else "TP : -")
+            with col4:
+                st.write(f"PNL : {pnl:+.2f} $")
+                if st.button("Fermer", key=f"close_{idx}"):
+                    account['balance'] += margin + pnl
+                    account['trade_history'].append({
+                        'type': 'CLOSE',
+                        'symbol': symbol,
+                        'quantity': pos['quantity'],
+                        'price': price_now,
+                        'profit': pnl,
+                        'time': datetime.now(),
+                        'balance': account['balance']
+                    })
+                    del account['positions'][idx]
+                    st.success(f"Position fermée avec PNL {pnl:+.2f} $")
+                    st.rerun()
+
+    # Historique Trading
+    st.subheader("🕓 Historique des Transactions")
+    if account['trade_history']:
+        history_df = pd.DataFrame(account['trade_history'])
         st.dataframe(
-            history_df.sort_values('time', ascending=False)
-            .style.format({
+            history_df.style.format({
                 'quantity': '{:.2f}',
                 'price': '{:.2f}',
                 'profit': '{:.2f}',
@@ -1703,7 +1700,56 @@ elif current_tab == "Compte Démo":
             })
         )
     else:
-        st.info("Aucune transaction enregistrée")
+        st.info("Aucune transaction effectuée encore.")
+
+    # ➡️ GRAPHIQUE TradingView avec Positions
+    st.subheader("📈 Vue Graphique des Positions")
+    fig = go.Figure()
+
+    # Bougie
+    fig.add_trace(go.Candlestick(
+        x=df['ds'],
+        open=df['Open'],
+        high=df['High'],
+        low=df['Low'],
+        close=df['y'],
+        name="Candles"
+    ))
+
+    # Affichage des Ordres
+    for pos in account['positions']:
+        fig.add_hline(
+            y=pos['entry_price'],
+            line_dash="dash",
+            line_color="white",
+            annotation_text=f"{pos['type']} {pos['quantity']}@{pos['entry_price']:.2f}",
+            annotation_position="top right"
+        )
+        if pos['stop_loss']:
+            fig.add_hline(
+                y=pos['stop_loss'],
+                line_dash="dot",
+                line_color="red",
+                annotation_text="SL",
+                annotation_position="left"
+            )
+        if pos['take_profit']:
+            fig.add_hline(
+                y=pos['take_profit'],
+                line_dash="dot",
+                line_color="green",
+                annotation_text="TP",
+                annotation_position="left"
+            )
+
+    fig.update_layout(
+        height=700,
+        template="plotly_dark",
+        hovermode="x unified"
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
 
 # Onglet News
 elif current_tab == "News":
