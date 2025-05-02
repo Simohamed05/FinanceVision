@@ -407,14 +407,7 @@ def load_data(symbol, start_date, end_date, retries=3):
     return pd.DataFrame(), {"error": "Toutes les tentatives ont échoué", "symbol": symbol, "rows": 0}
 
 # Mappage des symboles avec alternatives
-symbol_map = {
-    "XAUUSD": ["GC=F", "XAU-USD", "XAUUSD=X"],  # Multiple alternatives for gold
-    "EURUSD": ["EURUSD=X"],
-    "BTCUSD": ["BTC-USD"],
-    "USDJPY": ["JPY=X"],
-    "GBPUSD": ["GBPUSD=X"]
-}
-yahoo_symbol = symbol_map[symbol]
+
 # Get the primary symbol and alternatives
 symbol_options = symbol_map.get(symbol, [symbol])
 start_date = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')
