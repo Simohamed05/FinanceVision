@@ -326,63 +326,85 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
 
-# Mappage des symboles
-
-
-# Chargement des données avec cache
+# Chargement des données avec cache - VERSION OPTIMISÉE
 @st.cache_data(ttl=60, show_spinner="Chargement des données marché...")
 def load_data(symbol, start_date, end_date, retries=3):
-    df = pd.DataFrame()  # Initialize empty DataFrame
-    data_report = {"error": None, "symbol": symbol, "rows": 0}
-    # Après avoir chargé les données
+    # 🔵 1. SYMBOL MAPPING - Ajout d'un mapping vérifié des symboles
+    SYMBOL_MAP = {
+        "XAUUSD": "GC=F",
+        "EURUSD": "EURUSD=X",
+        "BTCUSD": "BTC-USD",
+        "USDJPY": "JPY=X",
+        "GBPUSD": "GBPUSD=X"
+    }
+    yf_symbol = SYMBOL_MAP.get(symbol, symbol)  # Fallback au symbole original si non trouvé
+
+    # 🔵 2. PARAMÈTRES AMÉLIORÉS
+    YF_PARAMS = {
+        "interval": "1d",
+        "timeout": 10,  # Timeout explicite
+        "auto_adjust": True  # Correction automatique des prix
+    }
+
     for attempt in range(retries):
         try:
-            data = yf.download(symbol, start=start_date, end=end_date, interval="1d", progress=False)
-            data.index = data.index.tz_localize(None)
-            if data.empty:
-                st.cache_data.clear()
-                data = yf.download(symbol, start=start_date, end=end_date, interval="1d", progress=False)
+            # 🔵 3. TÉLÉCHARGEMENT AVEC GESTION D'ERREUR AMÉLIORÉE
+            data = yf.download(
+                yf_symbol,
+                start=start_date,
+                end=end_date,
+                **YF_PARAMS
+            )
+            
+            # 🔵 4. VÉRIFICATION ROBUSTE DES DONNÉES
+            if data.empty or 'Close' not in data.columns:
+                if attempt == retries - 1:  # Dernière tentative
+                    return pd.DataFrame(), {"error": f"Aucune donnée valide pour {symbol}", "symbol": symbol}
+                time.sleep(2)
+                continue
 
-            # Create the DataFrame structure we need
+            # 🔵 5. NETTOYAGE OPTIMISÉ
             df = data.reset_index()[['Date', 'Close', 'Open', 'High', 'Low', 'Volume']]
             df.columns = ['ds', 'y', 'Open', 'High', 'Low', 'Volume']
             df['ds'] = pd.to_datetime(df['ds']).dt.normalize()
 
-            # Calculate technical indicators
-            try:
-                df['SMA_20'] = df['y'].rolling(window=20).mean()
-                df['SMA_50'] = df['y'].rolling(window=50).mean()
-                df['RSI'] = ta.momentum.rsi(df['y'], window=14)
-                df['MACD'] = ta.trend.macd_diff(df['y'])
-                df['BB_upper'] = df['y'].rolling(window=20).mean() + 2*df['y'].rolling(window=20).std()
-                df['BB_lower'] = df['y'].rolling(window=20).mean() - 2*df['y'].rolling(window=20).std()
-                df['STOCH'] = ta.momentum.stoch(df['High'], df['Low'], df['y'], window=14)
-                df['CCI'] = ta.trend.cci(df['High'], df['Low'], df['y'], window=20)
-                df['ATR'] = ta.volatility.average_true_range(df['High'], df['Low'], df['y'], window=14)
-            except Exception as e:
-                logger.error(f"Error calculating indicators: {str(e)}")
-                for col in ['SMA_20', 'SMA_50', 'RSI', 'MACD', 'BB_upper', 'BB_lower', 'STOCH', 'CCI', 'ATR']:
-                    if col not in df.columns:
-                        df[col] = np.nan
+            # 🔵 6. CALCUL DES INDICATEURS AVEC FALLBACK
+            INDICATORS = {
+                'SMA_20': lambda x: x['y'].rolling(20).mean(),
+                'SMA_50': lambda x: x['y'].rolling(50).mean(),
+                'RSI': lambda x: ta.momentum.rsi(x['y'], window=14),
+                'MACD': lambda x: ta.trend.macd_diff(x['y']),
+                'BB_upper': lambda x: x['y'].rolling(20).mean() + 2*x['y'].rolling(20).std(),
+                'BB_lower': lambda x: x['y'].rolling(20).mean() - 2*x['y'].rolling(20).std(),
+                'STOCH': lambda x: ta.momentum.stoch(x['High'], x['Low'], x['y'], window=14),
+                'CCI': lambda x: ta.trend.cci(x['High'], x['Low'], x['y'], window=20),
+                'ATR': lambda x: ta.volatility.average_true_range(x['High'], x['Low'], x['y'], window=14)
+            }
 
-            df = df.dropna()
+            for col, func in INDICATORS.items():
+                try:
+                    df[col] = func(df)
+                except Exception as e:
+                    logger.warning(f"Erreur sur {col}: {str(e)}")
+                    df[col] = np.nan
+
+            # 🔵 7. FILTRAGE DES DONNÉES INCOMPLÈTES
+            df = df.dropna().query("not y.isnull()")
             
             if len(df) < 20:
-                logger.warning(f"Insufficient data points ({len(df)}) for {symbol}, attempt {attempt + 1}")
-                time.sleep(2)
+                logger.warning(f"Données insuffisantes ({len(df)} points)")
                 continue
-                
-            data_report = {"error": None, "symbol": symbol, "rows": len(df)}
-            return df, data_report
+
+            return df, {"error": None, "symbol": symbol, "rows": len(df)}
             
         except Exception as e:
-            logger.error(f"Attempt {attempt + 1} failed for {symbol}: {str(e)}")
-            data_report = {"error": str(e), "symbol": symbol, "rows": 0}
+            error_msg = f"Tentative {attempt + 1} échouée: {str(e)}"
+            logger.error(error_msg)
             if attempt == retries - 1:
-                return pd.DataFrame(), data_report
+                return pd.DataFrame(), {"error": error_msg, "symbol": symbol, "rows": 0}
             time.sleep(2)
     
-    return df, data_report  # Return whatever we have (might be empty)
+    return pd.DataFrame(), {"error": "Toutes les tentatives ont échoué", "symbol": symbol, "rows": 0}
 
 # Mappage des symboles avec alternatives
 symbol_map = {
