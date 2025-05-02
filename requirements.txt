@@ -1,30 +1,30 @@
 # CORE
-streamlit==1.32.0
-yfinance==0.2.37
-pandas==2.1.4
-numpy==1.26.3
-plotly==5.18.0
+streamlit
+yfinance
+pandas
+numpy
+plotly
 
 # MODELES
-prophet==1.1.5
-statsmodels==0.14.1
-scikit-learn==1.3.2
-keras==2.15.0
-tensorflow==2.15.0  # ou tensorflow-cpu si sans GPU
+prophet
+statsmodels
+scikit-learn
+keras
+tensorflow  # ou tensorflow-cpu si sans GPU
 
 # TECHNIQUE
-ta==0.11.0  # Pour les indicateurs techniques
+ta  # Pour les indicateurs techniques
 
 # UTILITAIRES
-python-dotenv==1.0.0
-requests==2.31.0
-python-dateutil==2.8.2
-pytz==2023.3.post1
-tzlocal==5.2
-uuid==1.30
-logging==0.4.9.6
-warnings==2.0.0
+python-dotenv
+requests
+python-dateutil
+pytz
+tzlocal
+uuid
+logging
+warnings
 
 # OPTIONNEL (pour fonctionnalités avancées)
-websockets==12.0  # Pour connexion temps réel
-alpaca-trade-api==3.3.0  # Alternative à yfinance
+websockets  # Pour connexion temps réel
+alpaca-trade-api  # Alternative à yfinance
